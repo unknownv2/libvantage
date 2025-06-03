@@ -1,0 +1,39 @@
+{
+  "name": "libvantage",
+  "version": "0.3.3",
+  "description": "Utilities for creating awesome editors for Vantage.",
+  "license": "GPL-3.0",
+  "author": "Team Vantage",
+  "main": "dist/index.js",
+  "typings": "index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vantagemods/libvantage"
+  },
+  "scripts": {
+    "lint": "cross-env tslint --project tsconfig.json",
+    "build": "cross-env tsc --project tsconfig.json --outDir dist --module amd",
+    "postbuild": "cross-env copyfiles --up 1 src/**/*.html dist && npm run sass",
+    "prebuild": "cross-env rimraf dist && rimraf node_modules/@types/!node",
+    "sass": "./node_modules/.bin/node-sass -r ./src --output ./dist"
+  },
+  "dependencies": {
+    "aurelia-framework": "^1.1.5",
+    "big-integer": "^1.6.26",
+    "crc-32": "^1.1.1",
+    "tslib": "^1.8.1"
+  },
+  "devDependencies": {
+    "@types/big-integer": "0.0.31",
+    "@types/node": "^7.0.52",
+    "concurrently": "^3.5.1",
+    "copyfiles": "^1.2.0",
+    "cross-env": "^3.1.0",
+    "node-sass": "^4.7.2",
+    "requirejs": "^2.3.5",
+    "requirejs-text": "^2.0.15",
+    "rimraf": "^2.6.2",
+    "tslint": "4.5.1",
+    "typescript": "^2.6"
+  }
+}
