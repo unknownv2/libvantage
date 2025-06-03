@@ -1,11 +1,6 @@
 import * as bigInteger  from 'big-integer';
 import { BigInteger } from "big-integer";
-
-export enum SeekOrigin {
-    Begin = 'begin',
-    End = 'end',
-    Current = 'current',
-}
+import { Stream, SeekOrigin } from './stream';
 
 export enum Endianness {
     Little = 'le',
@@ -21,33 +16,23 @@ const bigIntNegateCache = new Map<number, BigInteger>([
     [8, maxUInt64.add(1)],
 ]);
 
-export class Stream {
-    private _position = 0;
-    private _length: number;
+const numberBuffer = Buffer.alloc(8);
+let stringBuffer: Buffer;
+
+export class BinaryStream {
     private _endiannessValue: Endianness;
     private _endiannessPostfix: string;
- 
-    constructor(private _buffer: Buffer, endianness = Endianness.Little) {
-        this._length = _buffer.length;
+    
+    constructor(private _stream: Stream, endianness = Endianness.Little) {
         this.endianness = endianness;
     }
 
-    public static alloc(size: number, endianness?: Endianness): Stream {
-        return new Stream(Buffer.alloc(size), endianness);
-    }
-
-    public static reserve(size: number, endianness?: Endianness): Stream {
-        const stream = Stream.alloc(size, endianness);
-        stream._length = 0;
-        return stream;
-    }
-
-    public getBuffer(): Buffer {
-        return this._buffer.slice(0, this.length);
+    public get baseStream(): Stream {
+        return this._stream;
     }
 
     public dispose(): void {
-        this._buffer = <any>null;
+        this._stream.dispose();
     }
 
     public get endianness(): Endianness {
@@ -59,79 +44,33 @@ export class Stream {
         this._endiannessPostfix = endianness === Endianness.Big ? 'BE' : 'LE';
     }
 
-    public get eof(): boolean {
-        return this.position >= this.length;
-    }
-
-    public get length(): number {
-        return this._length;
-    }
-
-    public get position(): number {
-        return this._position;
-    }
-
-    public set position(address: number) {
-        if (address > this.length) {
-            throw new Error('Cannot seek past end of stream.');
-        }
-        this._position = address;
-    }
-
-    public seek(offset: number, origin: SeekOrigin = SeekOrigin.Begin): Stream {
-        switch (origin) {
-            case SeekOrigin.Begin:
-                this.position = offset;
-                break;
-            case SeekOrigin.End:
-                this.position = this.length - offset;
-                break;
-            case SeekOrigin.Current:
-                this.position += offset;
-                break;
-        }
+    public skip(offset: number): BinaryStream {
+        this._stream.seek(offset, SeekOrigin.Current);
         return this;
-    }
-
-    public skip(offset: number): Stream {
-        this.seek(offset, SeekOrigin.Current);
-        return this;
-    }
-
-    public resize(size: number): Stream {
-        if (size > this._buffer.length) {
-            this._buffer = Buffer.concat([this._buffer], size);
-        }
-        this._length = size;
-        return this;
-    }
-
-    private expand(size: number): void {
-        const reserve = this.position + size;
-        if (reserve > this._length) {
-            if (reserve > this._buffer.length) {
-                this._buffer = Buffer.concat([this._buffer], Math.max(reserve, this._buffer.length * 1.5));
-            }
-            this._length = reserve;
-        }
     }
 
     public readBytes(length: number): Buffer {
-        this.position += length;
-        return this._buffer.slice(this.position - length, this.position);
+        const buffer = Buffer.alloc(length);
+        const readBytes = this._stream.read(buffer, 0, length);
+        return buffer.slice(0, readBytes);
     }
 
     public readToEnd(): Buffer {
-        return this.readBytes(this.length - this.position);
+        return this.readBytes(this._stream.length - this._stream.position);
+    }
+
+    public getBuffer(): Buffer {
+        this._stream.position = 0;
+        return this.readBytes(this._stream.length - this._stream.position);
     }
 
     private readNumber(type: string, size: number): number {
-        this.position += size;
-        return (<any>this._buffer)[`read${type}${size > 1 ? this._endiannessPostfix : ''}`](this.position - size);
+        this._stream.read(numberBuffer, 0, size);
+        return (<any>numberBuffer)[`read${type}${this._endiannessPostfix}`](0);
     }
 
     public readByte(): number {
-        return this.readNumber('UInt8', 1);
+        return this._stream.readByte();
     }
 
     public readBoolean(): boolean {
@@ -206,7 +145,7 @@ export class Stream {
         return this.readNumber('Double', 8);
     }
 
-    private loop<T>(type: string, callback: (io: Stream) => T): T[] {
+    private loop<T>(type: string, callback: (io: BinaryStream) => T): T[] {
         let count: number = (<any>this)[`read${type}`]();
         const results: T[] = [];
         while (count--) {
@@ -215,89 +154,102 @@ export class Stream {
         return results;
     }
 
-    public loopByte<T>(callback: (io: Stream) => T): T[] {
+    public loopByte<T>(callback: (io: BinaryStream) => T): T[] {
         return this.loop('Byte', callback);
     }
 
-    public loopUInt16<T>(callback: (io: Stream) => T): T[] {
+    public loopUInt16<T>(callback: (io: BinaryStream) => T): T[] {
         return this.loop('UInt16', callback);
     }
 
-    public loopUInt32<T>(callback: (io: Stream) => T): T[] {
+    public loopUInt32<T>(callback: (io: BinaryStream) => T): T[] {
         return this.loop('UInt32', callback);
     }
 
-    public loopUInt64<T>(callback: (io: Stream) => T): T[] {
+    public loopUInt64<T>(callback: (io: BinaryStream) => T): T[] {
         return this.loop('UInt64Unsafe', callback);
     }
 
-    private getCStringLength(encoding: BufferEncoding): number {
-        let position = this.position;
-        const terminatorLength = Buffer.byteLength('\0', encoding);
-        while (position + terminatorLength <= this.length) {
-            if (this._buffer.slice(position, position + terminatorLength).every((v: number) => v === 0)) {
-                return position - this.position;
-            }
-            position++;
+    private getStringBuffer(length: number): Buffer {
+        if (stringBuffer === undefined) {
+            stringBuffer = Buffer.alloc(Math.min(length, 32));
+        } else if (length > stringBuffer.length) {
+            const expansion = Math.max(stringBuffer.length * 2, length) - stringBuffer.length;
+            stringBuffer = Buffer.concat([stringBuffer, Buffer.alloc(expansion)], stringBuffer.length + expansion);
         }
-        return this.length - this.position;
+        return stringBuffer;
     }
 
-    public readString(encoding: BufferEncoding, chars: number = -1): string {
-        const length = chars === -1 
-            ? this.getCStringLength(encoding) 
-            : (Buffer.byteLength('\0', encoding) * chars);
-        this.position += length;
-        return this._buffer.toString(encoding, this.position - length, this.position);
+    public readString(encoding: BufferEncoding, bytes: number = -1): string {
+        if (bytes === -1) {
+            return this.readCString(encoding);
+        }
+        const buffer = this.getStringBuffer(bytes);
+        this._stream.read(buffer, 0, bytes);
+        return buffer.toString(encoding);
     }
 
-    public writeBytes(value: Buffer): Stream {
-        this.expand(value.length);
-        value.copy(this._buffer, this.position);
-        this.position += value.length;
+    private readCString(encoding: BufferEncoding): string {
+        const terminatorLength = Buffer.byteLength('\0', encoding);
+        let x = 0;
+        let consecutiveNullBytes = 0;
+        let buffer = this.getStringBuffer(terminatorLength);
+        while (true) {
+            if ((buffer[x++] = this._stream.readByte()) !== 0) {
+                consecutiveNullBytes = 0;
+            } else if (++consecutiveNullBytes === terminatorLength) {
+                return buffer.toString(encoding, 0, x - terminatorLength);
+            }
+            if (x === buffer.length) {
+                buffer = this.getStringBuffer(x * 2);
+            }
+        } 
+    }
+
+    public writeBytes(value: Buffer): BinaryStream {
+        this._stream.write(value, 0, value.length);
         return this;
     }
 
-    private writeNumber(type: string, value: number, size: number): Stream {
-        this.expand(size);
-        (<any>this._buffer)[`write${type}${size > 1 ? this._endiannessPostfix : ''}`](value, this.position);
-        this.position += size;
+    private writeNumber(type: string, value: number, size: number): BinaryStream {
+        (<any>numberBuffer)[`write${type}${size > 1 ? this._endiannessPostfix : ''}`](value, 0);
+        this._stream.write(numberBuffer, 0, size);
         return this;
     }
 
-    public writeByte(value: number): Stream {        
-        return this.writeNumber('UInt8', (value & 0xFF), 1);
+    public writeByte(value: number): BinaryStream {        
+        return this.writeNumber('UInt8', value, 1);
     }
 
-    public writeBoolean(flag: boolean): Stream {
+    public writeBoolean(flag: boolean): BinaryStream {
         return this.writeByte(flag ? 1 : 0);
     }
 
-    public writeUInt16(value: number): Stream {       
-        return this.writeNumber('UInt16', value >>> 0, 2);
+    public writeUInt16(value: number): BinaryStream {       
+        return this.writeNumber('UInt16', value, 2);
     }
 
-    public writeInt16(value: number): Stream {
+    public writeInt16(value: number): BinaryStream {
         return this.writeNumber('Int16', value, 2);
     }
 
-    public writeUInt32(value: number): Stream {      
-        return this.writeNumber('UInt32', value >>> 0, 4);
+    public writeUInt32(value: number): BinaryStream {      
+        return this.writeNumber('UInt32', value, 4);
     }
 
-    public writeInt32(value: number): Stream {
+    public writeInt32(value: number): BinaryStream {
         return this.writeNumber('Int32', value, 4);
     }
 
-    public writeUInt64(value: BigInteger|number): Stream {
+    public writeUInt64(value: BigInteger|number): BinaryStream {
         return this.writeBigInteger(this.assertBigIntegerBounds(value, minUInt64, maxUInt64), 8);  
     }
 
-    public writeInt64(value: BigInteger|number): Stream {
+    public writeInt64(value: BigInteger|number): BinaryStream {
         return this.writeBigInteger(this.assertBigIntegerBounds(value, minInt64, maxInt64), 8);  
     }
 
-    public writeBigInteger(value: BigInteger, byteLength: number = -1): Stream {
+    public writeBigInteger(value: BigInteger, byteLength: number = -1): BinaryStream {
         let hexString = value.toString(16);
         const negative = value.isNegative();
         if (negative) {
@@ -333,22 +285,20 @@ export class Stream {
         return value;
     }
 
-    public writeFloat(value: number): Stream {    
+    public writeFloat(value: number): BinaryStream {    
         return this.writeNumber('Float', value, 4);
     }
 
-    public writeDouble(value: number): Stream {
+    public writeDouble(value: number): BinaryStream {
         return this.writeNumber('Double', value, 8);
     }
 
-    public writeString(value: string, encoding: BufferEncoding = 'utf8', nullTerminate: boolean = false): Stream {
+    public writeString(value: string, encoding: BufferEncoding = 'utf8', nullTerminate: boolean = false): BinaryStream {
         if (nullTerminate) {
             value += '\0';
         }
-        const byteLength = Buffer.byteLength(value, encoding);
-        this.expand(byteLength);
-        this._buffer.write(value, this.position, byteLength, encoding);
-        this.position += byteLength;
+        const buffer = new Buffer(value, encoding);
+        this._stream.write(buffer, 0, buffer.length);
         return this;
     }
 }
